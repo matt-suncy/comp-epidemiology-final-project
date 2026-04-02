@@ -1,6 +1,6 @@
-# A "notebook" of SQL queries for the OHDSI database. 
-# These are not meant to be run as a script, 
-# but rather to be copied and pasted into a SQL client for execution.
+-- A "notebook" of SQL queries for the OHDSI database. 
+-- These are not meant to be run as a script, 
+-- but rather to be copied and pasted into a SQL client for execution.
 
 -- Define schema parameter
 -- USE YOUR SPECIFIC SCHEMA: e.g., @cdm_schema = 'synpuf5.dbo'
@@ -11,13 +11,17 @@ WITH uti_concepts AS (
     FROM @cdm_schema.concept_ancestor
     WHERE ancestor_concept_id = 224 -- Example OMOP concept ID for UTI
 ),
-
+-- For these I just picked the first standard ingredient I found
+@nitrofurantoin_id AS (SELECT 920293), -- Example RxNorm Ingredient Concept ID for Nitrofurantoin
+@cephalexin_id AS (SELECT 1786621), -- Example RxNorm Ingredient Concept ID for Cephalexin
+@ciprofloxacin_id AS (SELECT 1797513), -- Example RxNorm Ingredient Concept ID for Ciprofloxacin
+@trimethoprim_id AS (SELECT 1705674), -- Example RxNorm Ingredient Concept ID for Trimethoprim
 abx_ingredients AS (
     -- RxNorm Ingredient concepts for targeted empirical antibiotics
     SELECT descendant_concept_id AS concept_id
     FROM @cdm_schema.concept_ancestor
     WHERE ancestor_concept_id IN (
-        -- Replace with exact RxNorm Ingredient Concept IDs for your study
+        -- TODO: Replace with exact RxNorm Ingredient Concept IDs for your study
         -- E.g., Nitrofurantoin, Cephalexin, Ciprofloxacin, Trimethoprim
         @nitrofurantoin_id, @cephalexin_id, @ciprofloxacin_id, @trimethoprim_id 
     )
