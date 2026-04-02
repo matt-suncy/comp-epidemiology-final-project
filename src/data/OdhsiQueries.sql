@@ -8,46 +8,41 @@
 WITH uti_concepts AS (
     -- SNOMED CT concepts for UTI and descendants
     SELECT descendant_concept_id AS concept_id
-    FROM @cdm_schema.concept_ancestor
-    WHERE ancestor_concept_id = 224 -- Example OMOP concept ID for UTI
+    FROM concept_ancestor
+    WHERE ancestor_concept_id = 81902 -- Example OMOP concept ID for UTI
 ),
--- For these I just picked the first standard ingredient I found
-@nitrofurantoin_id AS (SELECT 920293), -- Example RxNorm Ingredient Concept ID for Nitrofurantoin
-@cephalexin_id AS (SELECT 1786621), -- Example RxNorm Ingredient Concept ID for Cephalexin
-@ciprofloxacin_id AS (SELECT 1797513), -- Example RxNorm Ingredient Concept ID for Ciprofloxacin
-@trimethoprim_id AS (SELECT 1705674), -- Example RxNorm Ingredient Concept ID for Trimethoprim
 abx_ingredients AS (
     -- RxNorm Ingredient concepts for targeted empirical antibiotics
     SELECT descendant_concept_id AS concept_id
-    FROM @cdm_schema.concept_ancestor
+    FROM concept_ancestor
     WHERE ancestor_concept_id IN (
         -- TODO: Replace with exact RxNorm Ingredient Concept IDs for your study
         -- E.g., Nitrofurantoin, Cephalexin, Ciprofloxacin, Trimethoprim
-        @nitrofurantoin_id, @cephalexin_id, @ciprofloxacin_id, @trimethoprim_id 
+        920293, 1786621, 1797513, 1705674 
     )
 ),
 
 sepsis_concepts AS (
     -- SNOMED CT concepts for Sepsis and Urosepsis
     SELECT descendant_concept_id AS concept_id
-    FROM @cdm_schema.concept_ancestor
-    WHERE ancestor_concept_id = 132281007 -- Example OMOP concept ID for Sepsis
+    FROM concept_ancestor
+    WHERE ancestor_concept_id = 132797
 ),
 
 -- Step 1: Identify Index Events (Outpatient UTI Diagnosis)
 outpatient_uti AS (
     SELECT 
         p.person_id, 
-        v.visit_start_date AS index_date,
-        p.year_of_birth
-    FROM @cdm_schema.person p
-    JOIN @cdm_schema.visit_occurrence v ON p.person_id = v.person_id
-    JOIN @cdm_schema.condition_occurrence co ON v.visit_occurrence_id = co.visit_occurrence_id
-    WHERE v.visit_concept_id = 9202 -- Standard OMOP Outpatient Visit Concept
+        v.visit_start_date AS index_date
+    FROM person p
+    JOIN visit_occurrence v ON p.person_id = v.person_id
+    JOIN condition_occurrence co ON v.visit_occurrence_id = co.visit_occurrence_id
+    WHERE (v.visit_concept_id = 9202 OR v.visit_concept_id = 9201)
       AND co.condition_concept_id IN (SELECT concept_id FROM uti_concepts)
 ),
 
--- Step 2: Form Target Cohort (T) - All treated outpatients aged 65+
+-- Step 2: Form Target Cohort (T)
+-- Patients with a UTI diagnosis who receive an antibiotic within 3 days
 target_cohort_unfiltered AS (
     SELECT 
         ou.person_id,
@@ -55,20 +50,18 @@ target_cohort_unfiltered AS (
         de.drug_era_start_date AS index_antibiotic_date,
         de.drug_concept_id AS index_antibiotic_concept_id
     FROM outpatient_uti ou
-    -- Join to drug_era to group overlapping prescriptions of the same active ingredient
-    JOIN @cdm_schema.drug_era de 
+    JOIN drug_era de 
         ON ou.person_id = de.person_id
         AND de.drug_concept_id IN (SELECT concept_id FROM abx_ingredients)
         AND de.drug_era_start_date BETWEEN ou.index_date AND DATEADD(day, 3, ou.index_date)
     -- Ensure 365 days of continuous prior observation and 30 days post-index
-    JOIN @cdm_schema.observation_period op 
+    JOIN observation_period op 
         ON ou.person_id = op.person_id
         AND op.observation_period_start_date <= DATEADD(day, -365, de.drug_era_start_date)
         AND op.observation_period_end_date >= DATEADD(day, 30, de.drug_era_start_date)
-    WHERE (YEAR(de.drug_era_start_date) - ou.year_of_birth) >= 65
 ),
 
--- Restrict to the first UTI event per patient to maintain independence
+-- Restrict to the first UTI event per patient to maintain statistical independence
 target_cohort AS (
     SELECT * FROM (
         SELECT *, ROW_NUMBER() OVER (PARTITION BY person_id ORDER BY index_antibiotic_date ASC) as row_num
@@ -77,72 +70,69 @@ target_cohort AS (
     WHERE row_num = 1
 ),
 
--- Step 3: Disaggregate Outcomes (O) (3 to 30 days post-index)
+-- Step 3: Identify First Occurrence of Each Failure Tier (within 30 days)
+-- Tier 1: Antibiotic Switch
 outcome_switch AS (
-    SELECT DISTINCT c.person_id, 1 AS switch_flag
+    SELECT 
+        c.person_id,
+        MIN(de2.drug_era_start_date) AS first_switch_date
     FROM target_cohort c
-    JOIN @cdm_schema.drug_era de2 
+    JOIN drug_era de2 
         ON c.person_id = de2.person_id
         AND de2.drug_concept_id IN (SELECT concept_id FROM abx_ingredients)
-        AND de2.drug_concept_id!= c.index_antibiotic_concept_id -- Different pharmacological ingredient
-        AND de2.drug_era_start_date BETWEEN DATEADD(day, 3, c.index_antibiotic_date) AND DATEADD(day, 30, c.index_antibiotic_date)
+        AND de2.drug_concept_id!= c.index_antibiotic_concept_id 
+        AND de2.drug_era_start_date BETWEEN DATEADD(day, 1, c.index_antibiotic_date) AND DATEADD(day, 30, c.index_antibiotic_date)
+    GROUP BY c.person_id
 ),
 
+-- Tier 2: ER Visit
 outcome_er AS (
-    SELECT DISTINCT c.person_id, 1 AS er_flag
+    SELECT 
+        c.person_id,
+        MIN(v.visit_start_date) AS first_er_date
     FROM target_cohort c
-    JOIN @cdm_schema.visit_occurrence v 
+    JOIN visit_occurrence v 
         ON c.person_id = v.person_id
         AND v.visit_concept_id = 9203 -- Standard OMOP Emergency Room Visit Concept
-        AND v.visit_start_date BETWEEN DATEADD(day, 3, c.index_antibiotic_date) AND DATEADD(day, 30, c.index_antibiotic_date)
+        AND v.visit_start_date BETWEEN DATEADD(day, 1, c.index_antibiotic_date) AND DATEADD(day, 30, c.index_antibiotic_date)
+    GROUP BY c.person_id
 ),
 
-outcome_inpatient AS (
-    SELECT DISTINCT c.person_id, 1 AS inpatient_flag
-    FROM target_cohort c
-    JOIN @cdm_schema.visit_occurrence v 
-        ON c.person_id = v.person_id
-        AND v.visit_concept_id = 9201 -- Standard OMOP Inpatient Visit Concept
-        AND v.visit_start_date BETWEEN DATEADD(day, 3, c.index_antibiotic_date) AND DATEADD(day, 30, c.index_antibiotic_date)
-),
-
+-- Tier 3: Sepsis
 outcome_sepsis AS (
-    SELECT DISTINCT c.person_id, 1 AS sepsis_flag
+    SELECT 
+        c.person_id,
+        MIN(co.condition_start_date) AS first_sepsis_date
     FROM target_cohort c
-    JOIN @cdm_schema.condition_occurrence co 
+    JOIN condition_occurrence co 
         ON c.person_id = co.person_id
         AND co.condition_concept_id IN (SELECT concept_id FROM sepsis_concepts)
-        AND co.condition_start_date BETWEEN DATEADD(day, 3, c.index_antibiotic_date) AND DATEADD(day, 30, c.index_antibiotic_date)
-),
-
--- Step 4: Extract Temporal Features (e.g., Prior Antibiotic Use)
-feature_prior_abx AS (
-    SELECT DISTINCT c.person_id, 1 AS prior_abx_90d_flag
-    FROM target_cohort c
-    JOIN @cdm_schema.drug_era de 
-        ON c.person_id = de.person_id
-        AND de.drug_concept_id IN (SELECT concept_id FROM abx_ingredients)
-        AND de.drug_era_end_date BETWEEN DATEADD(day, -90, c.index_antibiotic_date) AND DATEADD(day, -1, c.index_antibiotic_date)
+        AND co.condition_start_date BETWEEN DATEADD(day, 1, c.index_antibiotic_date) AND DATEADD(day, 30, c.index_antibiotic_date)
+    GROUP BY c.person_id
 )
 
--- Step 5: Final Dataset Assembly
+-- Step 4: Final Dataset Assembly with Early/Late Timeframes
 SELECT 
     c.person_id,
     c.index_antibiotic_date,
     c.index_antibiotic_concept_id,
     
-    -- Independent Target Outcome Columns (Disaggregated)
-    COALESCE(os.switch_flag, 0) AS outcome_abx_switch_30d,
-    COALESCE(oe.er_flag, 0) AS outcome_er_visit_30d,
-    COALESCE(oi.inpatient_flag, 0) AS outcome_inpatient_30d,
-    COALESCE(ose.sepsis_flag, 0) AS outcome_sepsis_30d,
+    -- Overall Binary Failure Flag (Any failure within 30 days)
+    CASE WHEN os.person_id IS NOT NULL OR oe.person_id IS NOT NULL OR ose.person_id IS NOT NULL THEN 1 ELSE 0 END AS failure_any_30d_flag,
     
-    -- Baseline Features
-    COALESCE(fpa.prior_abx_90d_flag, 0) AS feature_prior_abx_90d
+    -- Tier 1: Antibiotic Switch (Early vs Late)
+    CASE WHEN os.first_switch_date <= DATEADD(day, 7, c.index_antibiotic_date) THEN 1 ELSE 0 END AS tier1_switch_early_7d_flag,
+    CASE WHEN os.first_switch_date > DATEADD(day, 7, c.index_antibiotic_date) THEN 1 ELSE 0 END AS tier1_switch_late_8_30d_flag,
+
+    -- Tier 2: ER Visit (Early vs Late)
+    CASE WHEN oe.first_er_date <= DATEADD(day, 7, c.index_antibiotic_date) THEN 1 ELSE 0 END AS tier2_er_early_7d_flag,
+    CASE WHEN oe.first_er_date > DATEADD(day, 7, c.index_antibiotic_date) THEN 1 ELSE 0 END AS tier2_er_late_8_30d_flag,
+    
+    -- Tier 3: Sepsis (Early vs Late)
+    CASE WHEN ose.first_sepsis_date <= DATEADD(day, 7, c.index_antibiotic_date) THEN 1 ELSE 0 END AS tier3_sepsis_early_7d_flag,
+    CASE WHEN ose.first_sepsis_date > DATEADD(day, 7, c.index_antibiotic_date) THEN 1 ELSE 0 END AS tier3_sepsis_late_8_30d_flag
 
 FROM target_cohort c
 LEFT JOIN outcome_switch os ON c.person_id = os.person_id
 LEFT JOIN outcome_er oe ON c.person_id = oe.person_id
-LEFT JOIN outcome_inpatient oi ON c.person_id = oi.person_id
-LEFT JOIN outcome_sepsis ose ON c.person_id = ose.person_id
-LEFT JOIN feature_prior_abx fpa ON c.person_id = fpa.person_id;
+LEFT JOIN outcome_sepsis ose ON c.person_id = ose.person_id;
