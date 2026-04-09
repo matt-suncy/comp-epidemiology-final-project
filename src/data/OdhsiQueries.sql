@@ -35,10 +35,21 @@ WITH uti_concepts AS (
          )
      ),
 
+-- Create an inclusive list of all systemic antibiotics for switch/escalation tracking
+     all_antibiotics AS (
+         SELECT descendant_concept_id AS concept_id
+         FROM concept_ancestor
+         WHERE ancestor_concept_id = 21602796 -- ATC Class J01: ANTIBACTERIALS FOR SYSTEMIC USE
+     ),
+
      sepsis_concepts AS (
          SELECT descendant_concept_id AS concept_id
          FROM concept_ancestor
-         WHERE ancestor_concept_id = 132797
+         WHERE ancestor_concept_id in (
+            132797, -- Sepsis
+            75576,  -- Pyelonephritis (Kidney infection)
+            197320  -- Acute kidney injury
+         )
      ),
 
 -- Step 1: Identify UTI diagnosis events
@@ -86,7 +97,7 @@ WITH uti_concepts AS (
                   SELECT
                       *,
                       ROW_NUMBER() OVER (
-                          PARTITION BY person_id
+                          PARTITION BY person_id, uti_date
                           ORDER BY index_antibiotic_date ASC
                           ) AS row_num
                   FROM target_cohort_unfiltered
@@ -98,43 +109,46 @@ WITH uti_concepts AS (
      outcome_switch AS (
          SELECT
              c.person_id,
+             c.uti_date,
              MIN(de2.drug_exposure_start_date) AS first_switch_date
          FROM target_cohort c
                   JOIN drug_exposure de2
                        ON c.person_id = de2.person_id
-                           AND de2.drug_concept_id IN (SELECT concept_id FROM abx_concepts)
+                           AND de2.drug_concept_id IN (SELECT concept_id FROM all_antibiotics)
                            AND de2.drug_concept_id <> c.index_antibiotic_concept_id
-                           AND de2.drug_exposure_start_date BETWEEN DATEADD(day, 1, c.index_antibiotic_date)
-                              AND DATEADD(day, 30, c.index_antibiotic_date)
-         GROUP BY c.person_id
+                           AND CAST(de2.drug_exposure_start_date AS DATE) BETWEEN DATEADD(day, 1, CAST(c.index_antibiotic_date AS DATE))
+                              AND DATEADD(day, 30, CAST(c.index_antibiotic_date AS DATE))
+         GROUP BY c.person_id, c.uti_date
      ),
 
 -- Tier 2: ER visit within 30 days
      outcome_er AS (
          SELECT
              c.person_id,
+             c.uti_date,
              MIN(v.visit_start_date) AS first_er_date
          FROM target_cohort c
                   JOIN visit_occurrence v
                        ON c.person_id = v.person_id
-                           AND v.visit_concept_id = 9203
-                           AND v.visit_start_date BETWEEN DATEADD(day, 1, c.index_antibiotic_date)
-                              AND DATEADD(day, 30, c.index_antibiotic_date)
-         GROUP BY c.person_id
+                           AND v.visit_concept_id IN (9201, 9203, 262, 8717, 32036) --NOTE: does 9202 (outpaatient) belong here?
+                           AND CAST(v.visit_start_date AS DATE) BETWEEN DATEADD(day, 1, CAST(c.index_antibiotic_date AS DATE))
+                              AND DATEADD(day, 30, CAST(c.index_antibiotic_date AS DATE))
+         GROUP BY c.person_id, c.uti_date
      ),
 
 -- Tier 3: Sepsis within 30 days
      outcome_sepsis AS (
          SELECT
              c.person_id,
+             c.uti_date,
              MIN(co.condition_start_date) AS first_sepsis_date
          FROM target_cohort c
                   JOIN condition_occurrence co
                        ON c.person_id = co.person_id
                            AND co.condition_concept_id IN (SELECT concept_id FROM sepsis_concepts)
-                           AND co.condition_start_date BETWEEN DATEADD(day, 1, c.index_antibiotic_date)
-                              AND DATEADD(day, 30, c.index_antibiotic_date)
-         GROUP BY c.person_id
+                           AND CAST(co.condition_start_date AS DATE) BETWEEN DATEADD(day, 1, CAST(c.index_antibiotic_date AS DATE))
+                              AND DATEADD(day, 30, CAST(c.index_antibiotic_date AS DATE))
+         GROUP BY c.person_id, c.uti_date
      )
 
 -- Final analytic dataset
@@ -189,8 +203,8 @@ SELECT
 
 FROM target_cohort c
          LEFT JOIN outcome_switch os
-                   ON c.person_id = os.person_id
+                   ON c.person_id = os.person_id AND c.uti_date = os.uti_date
          LEFT JOIN outcome_er oe
-                   ON c.person_id = oe.person_id
+                   ON c.person_id = oe.person_id AND c.uti_date = oe.uti_date
          LEFT JOIN outcome_sepsis ose
-                   ON c.person_id = ose.person_id;
+                   ON c.person_id = ose.person_id AND c.uti_date = ose.uti_date;
