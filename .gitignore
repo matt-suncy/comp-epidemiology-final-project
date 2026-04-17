@@ -1,4 +1,8 @@
+# Python stuff
 *.pyc
 *.pyd
 __pycache__/
 
+# Raw data
+*.csv
+*.tsv
