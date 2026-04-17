@@ -76,22 +76,24 @@ demographics AS (
 ),
 
 -- ---------------------------------------------------------------------------
--- 3. Clinical Conditions (Lookback: 365 Days Prior to Index)
--- Uses MAX() to roll up multiple occurrences into a single yes/no flag.
+-- 3. Clinical Conditions (Lookback: Anytime and 365 Days Prior)
+-- Uses MAX() to roll up multiple occurrences into single yes/no flags.
 -- ---------------------------------------------------------------------------
 condition_history AS (
     SELECT
         c.person_id,
         c.index_date,
-        -- Check if any of their prior conditions match the broad kidney disease concepts
-        MAX(CASE WHEN kdc.concept_id IS NOT NULL THEN 1 ELSE 0 END) AS history_any_kidney_disease,
-        -- Check specifically for Chronic Kidney Disease (CKD)
-        MAX(CASE WHEN ckd.concept_id IS NOT NULL THEN 1 ELSE 0 END) AS history_ckd
+        -- "Ever" flags (Anytime strictly before index date)
+        MAX(CASE WHEN kdc.concept_id IS NOT NULL THEN 1 ELSE 0 END) AS history_any_kidney_disease_ever,
+        MAX(CASE WHEN ckd.concept_id IS NOT NULL THEN 1 ELSE 0 END) AS history_ckd_ever,
+        -- "Within 365 Days" flags
+        MAX(CASE WHEN kdc.concept_id IS NOT NULL AND CAST(co.condition_start_date AS DATE) >= DATEADD(day, -365, CAST(c.index_date AS DATE)) THEN 1 ELSE 0 END) AS history_any_kidney_disease_365d,
+        MAX(CASE WHEN ckd.concept_id IS NOT NULL AND CAST(co.condition_start_date AS DATE) >= DATEADD(day, -365, CAST(c.index_date AS DATE)) THEN 1 ELSE 0 END) AS history_ckd_365d
     FROM patient_cohort c
     LEFT JOIN condition_occurrence co
            ON c.person_id = co.person_id
-          -- Ensure the condition occurred within the 365 days prior to index date
-          AND CAST(co.condition_start_date AS DATE) BETWEEN DATEADD(day, -365, CAST(c.index_date AS DATE)) AND DATEADD(day, -1, CAST(c.index_date AS DATE))
+          -- Ensure the condition occurred strictly BEFORE the index date
+          AND CAST(co.condition_start_date AS DATE) < CAST(c.index_date AS DATE)
     LEFT JOIN kidney_disease_concepts kdc
            ON co.condition_concept_id = kdc.concept_id
     LEFT JOIN ckd_concepts ckd
@@ -132,8 +134,10 @@ SELECT
     
     -- COALESCE ensures that if a patient had no records (resulting in NULL from the LEFT JOIN), 
     -- they are safely assigned a 0 (No/None).
-    COALESCE(ch.history_any_kidney_disease, 0) AS hx_kidney_disease_flag,
-    COALESCE(ch.history_ckd, 0) AS hx_ckd_flag,
+    COALESCE(ch.history_any_kidney_disease_ever, 0) AS hx_kidney_disease_ever_flag,
+    COALESCE(ch.history_ckd_ever, 0) AS hx_ckd_ever_flag,
+    COALESCE(ch.history_any_kidney_disease_365d, 0) AS hx_kidney_disease_365d_flag,
+    COALESCE(ch.history_ckd_365d, 0) AS hx_ckd_365d_flag,
     COALESCE(ph.prior_hosp_1yr_count, 0) AS prior_hospitalization_1yr_count
 
 FROM demographics d
