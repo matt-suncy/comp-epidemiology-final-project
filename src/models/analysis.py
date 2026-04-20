@@ -2,8 +2,11 @@ import os
 import argparse
 import pandas as pd
 import numpy as np
+from datetime import datetime
+import pytz
 
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -14,62 +17,60 @@ from sklearn.metrics import (
 import xgboost as xgb
 
 class CohortDataLoader:
-    def __init__(self, target_cohort_path: str, predictors_path: str, separator: str = ','):
-        self.target_cohort_path = target_cohort_path
-        self.predictors_path = predictors_path
+    def __init__(self, data_path: str, target_col: str, drop_cols: list = None, separator: str = ','):
+        self.data_path = data_path
+        self.target_col = target_col
+        self.drop_cols = drop_cols if drop_cols else []
         self.separator = separator
-        self.patients = None
+        self.patients_info = None
         self.predictors = None
         self.targets = None
 
     def load_data(self):
         '''
-        Loads and validates target cohort and predictors.
-        Sets self.patients, self.predictors, and self.targets.
+        Loads the unified cohort dataset.
+        Segments it into patient_info, targets, and predictors.
+        Sets self.patients_info, self.predictors, and self.targets.
         Returns:
-            patients: DataFrame containing person_id and index_date
+            patients_info: DataFrame containing non-predictor logistical info
             predictors: DataFrame containing predictor variables
-            targets: DataFrame containing target variables
+            targets: DataFrame containing the target variable
         '''
-        # Check if the files exist
-        if not os.path.exists(self.target_cohort_path):
-            raise FileNotFoundError(f"Target cohort file not found: {self.target_cohort_path}")
-        if not os.path.exists(self.predictors_path):
-            raise FileNotFoundError(f"Predictors file not found: {self.predictors_path}")
+        if not os.path.exists(self.data_path):
+            raise FileNotFoundError(f"Data file not found: {self.data_path}")
 
-        # Check if first two columns are person_id and index_date by peeking at headers
-        target_head = pd.read_csv(self.target_cohort_path, nrows=0, sep=self.separator)
-        pred_head = pd.read_csv(self.predictors_path, nrows=0, sep=self.separator)
+        print(f"Loading unified data from {self.data_path}...")
+        df = pd.read_csv(self.data_path, sep=self.separator)
         
-        if list(target_head.columns[:2]) != ['person_id', 'index_date']:
-            raise ValueError("First two columns of target cohort file must be person_id and index_date")
-        if list(pred_head.columns[:2]) != ['person_id', 'index_date']:
-            raise ValueError("First two columns of predictors file must be person_id and index_date")
+        print(f"Total dataset shape: {df.shape}")
 
-        # Load the data efficiently once
-        target_cohort = pd.read_csv(self.target_cohort_path, sep=self.separator)
-        predictors_df = pd.read_csv(self.predictors_path, sep=self.separator)
+        if self.target_col not in df.columns:
+            raise ValueError(f"Target column '{self.target_col}' not found in dataset!")
 
-        # Print basic info about the data
-        print(f"Target cohort shape: {target_cohort.shape}")
-        print(f"Predictors shape: {predictors_df.shape}")
-        
-        # Partition data into attributes
-        self.targets = target_cohort.iloc[:, 2:]
-        self.predictors = predictors_df.iloc[:, 2:]
-        self.patients = target_cohort.iloc[:, :2]
+        # 1. Extract Target
+        self.targets = df[[self.target_col]]
 
-        return self.patients, self.predictors, self.targets
+        # 2. Extract Patient Info / Drop Columns
+        actual_drop_cols = [c for c in self.drop_cols if c in df.columns]
+        self.patients_info = df[actual_drop_cols]
 
-def preprocess_data(predictors: pd.DataFrame, targets: pd.DataFrame, target_col: str, random_state: int = 42):
+        # 3. Extract Predictors (Everything Else)
+        # Drop both the target and the patient info from the features
+        self.predictors = df.drop(columns=actual_drop_cols + [self.target_col])
+
+        print(f"Targets shape: {self.targets.shape}")
+        print(f"Patient Info shape: {self.patients_info.shape}")
+        print(f"Predictors shape: {self.predictors.shape}")
+
+        return self.patients_info, self.predictors, self.targets
+
+def preprocess_data(patients_info: pd.DataFrame, predictors: pd.DataFrame, targets: pd.DataFrame, target_col: str):
     """
-    Combines predictors and targets, imputes missing values, and prepares
-    the data for modeling (train/test split and scaling).
+    Combines predictors and targets, imputes missing values.
+    Returns un-scaled features to allow K-Fold cross validation to scale safely inside folds.
     """
     print("\n--- Preprocessing Data ---")
     
-    # Merge targets onto predictors (assuming index alignments match)
-    # Since they were sliced from the same dataframe in the dataloader:
     if target_col not in targets.columns:
         raise ValueError(f"Target column '{target_col}' not found in target dataframe.")
 
@@ -79,7 +80,12 @@ def preprocess_data(predictors: pd.DataFrame, targets: pd.DataFrame, target_col:
     # Fill missing values
     X = X.fillna(0)
 
-    # Convert categoricals if present
+    # Automatically dummy-encode any remaining object/string columns
+    object_cols = X.select_dtypes(include=['object', 'string']).columns.tolist()
+    if object_cols:
+        X = pd.get_dummies(X, columns=object_cols, drop_first=True)
+
+    # Convert categoricals if present (gender_concept_id is natively int, so it needs explicit handling)
     if "gender_concept_id" in X.columns:
         X = pd.get_dummies(X, columns=["gender_concept_id"], drop_first=True)
 
@@ -87,115 +93,160 @@ def preprocess_data(predictors: pd.DataFrame, targets: pd.DataFrame, target_col:
     print(f"Target distribution for '{target_col}':")
     print(y.value_counts(normalize=True))
 
-    # Train / Test Splitting
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y,
-        test_size=0.2,
-        random_state=random_state,
-        stratify=y
-    )
+    return X, y, X.columns
 
-    # Scaling Features
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
+def save_results(method_name: str, metrics_str: str, results_df: pd.DataFrame):
+    """Saves metrics and patient-level predictions to the results folder."""
+    os.makedirs("results", exist_ok=True)
+    
+    # Generate EST timestamp
+    est = pytz.timezone('America/New_York')
+    timestamp = datetime.now(est).strftime("%Y%m%d_%H%M%S_EST")
+    
+    # Save Metrics
+    metrics_path = f"results/{method_name}_metrics_{timestamp}.txt"
+    with open(metrics_path, "w") as f:
+        f.write(metrics_str)
+    
+    # Save Predictions
+    preds_path = f"results/{method_name}_predictions_{timestamp}.csv"
+    results_df.to_csv(preds_path, index=False)
+    
+    print(f"\n[+] Results saved successfully to:\n   - {metrics_path}\n   - {preds_path}")
 
-    return X_train_scaled, X_test_scaled, y_train, y_test, X.columns
-
-def run_logistic_regression(X_train, X_test, y_train, y_test, feature_names, random_state: int = 42):
+def run_logistic_regression(X, y, patients_info, feature_names, cv_folds: int = 5, random_state: int = 42):
     print("\n" + "="*40)
-    print("Executing LOGISTIC REGRESSION")
+    print(f"Executing LOGISTIC REGRESSION ({cv_folds}-Fold CV)")
     print("="*40)
     
-    model = LogisticRegression(
-        max_iter=1000,
-        class_weight="balanced",
-        random_state=random_state
-    )
-    model.fit(X_train, y_train)
-
-    y_pred = model.predict(X_test)
-    y_proba = model.predict_proba(X_test)[:, 1]
-
-    print("ROC-AUC:", roc_auc_score(y_test, y_proba))
-    print("\nClassification Report:")
-    print(classification_report(y_test, y_pred))
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
     
-    print("\nConfusion Matrix:")
-    print(confusion_matrix(y_test, y_pred))
+    pipeline = Pipeline([
+        ('scaler', StandardScaler()),
+        ('model', LogisticRegression(max_iter=1000, class_weight="balanced", random_state=random_state))
+    ])
 
-    # Feature Importance (Coefficients)
+    print(f"Running cross validation...")
+    y_pred = cross_val_predict(pipeline, X, y, cv=cv, method="predict")
+    y_proba = cross_val_predict(pipeline, X, y, cv=cv, method="predict_proba")[:, 1]
+
+    # Generate Metrics
+    roc_val = roc_auc_score(y, y_proba)
+    cr_val = classification_report(y, y_pred)
+    cm_val = confusion_matrix(y, y_pred)
+    
+    # Fit globally once just to gracefully extract final feature coefficients
+    pipeline.fit(X, y)
+    model = pipeline.named_steps['model']
     coefficients = pd.DataFrame({
         "feature": feature_names,
         "coefficient": model.coef_[0]
     })
     coefficients["abs_coef"] = coefficients["coefficient"].abs()
     coefficients = coefficients.sort_values(by="abs_coef", ascending=False)
-    
-    print("\nTop 10 Feature Coefficients:")
-    print(coefficients.head(10))
+    top_10 = coefficients.head(10).to_string()
 
-def run_xgboost(X_train, X_test, y_train, y_test, random_state: int = 42):
+    # Compile the printed output block
+    metrics_block = (
+        f"Cross-Validated ROC-AUC: {roc_val}\n\n"
+        f"Classification Report:\n{cr_val}\n\n"
+        f"Confusion Matrix:\n{cm_val}\n\n"
+        f"Top 10 Feature Coefficients (Global Fit):\n{top_10}\n"
+    )
+    print(metrics_block)
+
+    # Append tracking columns
+    test_results = patients_info.copy()
+    test_results['true_label'] = y
+    test_results['log_reg_pred'] = y_pred
+    test_results['log_reg_prob'] = y_proba
+
+    save_results("log_reg", metrics_block, test_results)
+    return test_results
+
+def run_xgboost(X, y, patients_info, cv_folds: int = 5, random_state: int = 42):
     print("\n" + "="*40)
-    print("Executing XGBOOST")
+    print(f"Executing XGBOOST ({cv_folds}-Fold CV)")
     print("="*40)
 
-    xgb_model = xgb.XGBClassifier(
-        n_estimators=300,
-        max_depth=5,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=random_state,
-        eval_metric="logloss"
-    )
-
-    # Note: XGBoost handles non-scaled data fine, but we pass scaled sets for uniformity
-    xgb_model.fit(X_train, y_train)
-
-    y_pred_xgb = xgb_model.predict(X_test)
-    y_proba_xgb = xgb_model.predict_proba(X_test)[:, 1]
-
-    print("XGBoost ROC-AUC:", roc_auc_score(y_test, y_proba_xgb))
-    print("\nClassification Report:")
-    print(classification_report(y_test, y_pred_xgb))
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
     
-    print("\nConfusion Matrix:")
-    print(confusion_matrix(y_test, y_pred_xgb))
+    # XGBoost does not strictly need scaling, but the pipeline maintains analytical uniformity
+    pipeline = Pipeline([
+        ('scaler', StandardScaler()),
+        ('model', xgb.XGBClassifier(
+            n_estimators=300,
+            max_depth=5,
+            learning_rate=0.05,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            random_state=random_state,
+            eval_metric="logloss"
+        ))
+    ])
 
+    print(f"Running cross validation...")
+    y_pred_xgb = cross_val_predict(pipeline, X, y, cv=cv, method="predict")
+    y_proba_xgb = cross_val_predict(pipeline, X, y, cv=cv, method="predict_proba")[:, 1]
+
+    roc_val = roc_auc_score(y, y_proba_xgb)
+    cr_val = classification_report(y, y_pred_xgb)
+    cm_val = confusion_matrix(y, y_pred_xgb)
+
+    metrics_block = (
+        f"Cross-Validated ROC-AUC: {roc_val}\n\n"
+        f"Classification Report:\n{cr_val}\n\n"
+        f"Confusion Matrix:\n{cm_val}\n"
+    )
+    print(metrics_block)
+
+    test_results = patients_info.copy()
+    test_results['true_label'] = y
+    test_results['xgb_pred'] = y_pred_xgb
+    test_results['xgb_prob'] = y_proba_xgb
+
+    save_results("xgboost", metrics_block, test_results)
+    return test_results
 
 def main():
     parser = argparse.ArgumentParser(description="Run Cohort Analysis Pipeline")
-    parser.add_argument("--target_cohort", type=str, required=True, help="Path to the target cohort CSV")
-    parser.add_argument("--predictors", type=str, required=True, help="Path to the predictors CSV")
+    parser.add_argument("--data", type=str, required=True, help="Path to the unified cohort CSV")
     parser.add_argument("--target_col", type=str, default="recurrent_uti_90d_flag", help="Outcome column to predict")
     parser.add_argument("--methods", nargs="+", choices=["log_reg", "xgboost"], required=True, help="Methods to run")
     parser.add_argument("--random_state", type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument("--cv_folds", type=int, default=5, help="Number of folds for Cross Validation (default: 5)")
 
     args = parser.parse_args()
 
-    # 1. Load Data
-    print("Loading data via CohortDataLoader...")
-    loader = CohortDataLoader(
-        target_cohort_path=args.target_cohort,
-        predictors_path=args.predictors
-    )
-    patients, predictors, targets = loader.load_data()
+    drop_cols = [
+        "person_id",
+        "index_uti_date",
+        "first_recurrent_uti_date",
+        "first_abx_0_10d_date"
+    ]
 
-    # 2. Preprocess Data
-    X_train_scaled, X_test_scaled, y_train, y_test, feature_names = preprocess_data(
+    # 1. Load Data
+    loader = CohortDataLoader(
+        data_path=args.data,
+        target_col=args.target_col,
+        drop_cols=drop_cols
+    )
+    patients_info, predictors, targets = loader.load_data()
+
+    # 2. Preprocess Data (No scaling/splitting here, delayed for CV pipeline)
+    X, y, feature_names = preprocess_data(
+        patients_info=patients_info,
         predictors=predictors, 
         targets=targets, 
-        target_col=args.target_col,
-        random_state=args.random_state
+        target_col=args.target_col
     )
 
     # 3. Model Execution
     if "log_reg" in args.methods:
-        run_logistic_regression(X_train_scaled, X_test_scaled, y_train, y_test, feature_names, random_state=args.random_state)
+        run_logistic_regression(X, y, patients_info, feature_names, cv_folds=args.cv_folds, random_state=args.random_state)
 
     if "xgboost" in args.methods:
-        run_xgboost(X_train_scaled, X_test_scaled, y_train, y_test, random_state=args.random_state)
+        run_xgboost(X, y, patients_info, cv_folds=args.cv_folds, random_state=args.random_state)
 
 if __name__ == "__main__":
     main()
