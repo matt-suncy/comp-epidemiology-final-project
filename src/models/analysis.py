@@ -9,6 +9,7 @@ from sklearn.model_selection import StratifiedKFold, cross_val_predict
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
 from sklearn.metrics import (
     roc_auc_score,
     classification_report,
@@ -202,11 +203,46 @@ def run_xgboost(X, y, patients_info, run_dir: str, cv_folds: int = 5, random_sta
     save_results("xgboost", metrics_block, test_results, run_dir)
     return test_results
 
+def run_svm(X, y, patients_info, run_dir: str, cv_folds: int = 5, random_state: int = 42):
+    print("\n" + "="*40)
+    print(f"Executing SVM ({cv_folds}-Fold CV)")
+    print("="*40)
+
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+    
+    pipeline = Pipeline([
+        ('scaler', StandardScaler()),
+        ('model', SVC(probability=True, class_weight="balanced", random_state=random_state))
+    ])
+
+    print(f"Running cross validation...")
+    y_pred_svm = cross_val_predict(pipeline, X, y, cv=cv, method="predict")
+    y_proba_svm = cross_val_predict(pipeline, X, y, cv=cv, method="predict_proba")[:, 1]
+
+    roc_val = roc_auc_score(y, y_proba_svm)
+    cr_val = classification_report(y, y_pred_svm)
+    cm_val = confusion_matrix(y, y_pred_svm)
+
+    metrics_block = (
+        f"Cross-Validated ROC-AUC: {roc_val}\n\n"
+        f"Classification Report:\n{cr_val}\n\n"
+        f"Confusion Matrix:\n{cm_val}\n"
+    )
+    print(metrics_block)
+
+    test_results = patients_info.copy()
+    test_results['true_label'] = y
+    test_results['svm_pred'] = y_pred_svm
+    test_results['svm_prob'] = y_proba_svm
+
+    save_results("svm", metrics_block, test_results, run_dir)
+    return test_results
+
 def main():
     parser = argparse.ArgumentParser(description="Run Cohort Analysis Pipeline")
     parser.add_argument("--data", type=str, required=True, help="Path to the unified cohort CSV")
     parser.add_argument("--target_col", type=str, default="recurrent_uti_90d_flag", help="Outcome column to predict")
-    parser.add_argument("--methods", nargs="+", choices=["log_reg", "xgboost"], required=True, help="Methods to run")
+    parser.add_argument("--methods", nargs="+", choices=["log_reg", "xgboost", "svm"], required=True, help="Methods to run")
     parser.add_argument("--random_state", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--cv_folds", type=int, default=5, help="Number of folds for Cross Validation (default: 5)")
 
@@ -248,6 +284,9 @@ def main():
 
     if "xgboost" in args.methods:
         run_xgboost(X, y, patients_info, run_dir, cv_folds=args.cv_folds, random_state=args.random_state)
+
+    if "svm" in args.methods:
+        run_svm(X, y, patients_info, run_dir, cv_folds=args.cv_folds, random_state=args.random_state)
 
 if __name__ == "__main__":
     main()
