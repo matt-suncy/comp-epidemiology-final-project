@@ -6,3 +6,4 @@ __pycache__/
 # Raw data
 *.csv
 *.tsv
+*.txt
