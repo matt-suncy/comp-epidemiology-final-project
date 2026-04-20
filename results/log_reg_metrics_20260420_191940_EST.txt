@@ -1,0 +1,29 @@
+Cross-Validated ROC-AUC: 0.6309530408615774
+
+Classification Report:
+              precision    recall  f1-score   support
+
+           0       0.86      0.61      0.72      1435
+           1       0.28      0.60      0.38       352
+
+    accuracy                           0.61      1787
+   macro avg       0.57      0.61      0.55      1787
+weighted avg       0.75      0.61      0.65      1787
+
+
+Confusion Matrix:
+[[881 554]
+ [141 211]]
+
+Top 10 Feature Coefficients (Global Fit):
+                         feature  coefficient  abs_coef
+5               total_visits_1yr     0.422067  0.422067
+11  prior_distinct_abx_count_1yr     0.253261  0.253261
+16                  htn_1yr_flag     0.228735  0.228735
+22             diabetes_1yr_flag     0.214058  0.214058
+12                 ckd_ever_flag     0.211992  0.211992
+23            diabetes_1yr_count    -0.138908  0.138908
+15                 htn_ever_flag    -0.131472  0.131472
+6          outpatient_visits_1yr    -0.114080  0.114080
+14                 ckd_1yr_count    -0.113853  0.113853
+17                 htn_1yr_count    -0.106426  0.106426

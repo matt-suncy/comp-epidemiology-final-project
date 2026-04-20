@@ -1,0 +1,16 @@
+Cross-Validated ROC-AUC: 0.5915386442825467
+
+Classification Report:
+              precision    recall  f1-score   support
+
+           0       0.81      0.96      0.88      1435
+           1       0.35      0.09      0.14       352
+
+    accuracy                           0.79      1787
+   macro avg       0.58      0.52      0.51      1787
+weighted avg       0.72      0.79      0.73      1787
+
+
+Confusion Matrix:
+[[1375   60]
+ [ 320   32]]
