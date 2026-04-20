@@ -95,26 +95,20 @@ def preprocess_data(patients_info: pd.DataFrame, predictors: pd.DataFrame, targe
 
     return X, y, X.columns
 
-def save_results(method_name: str, metrics_str: str, results_df: pd.DataFrame):
-    """Saves metrics and patient-level predictions to the results folder."""
-    os.makedirs("results", exist_ok=True)
-    
-    # Generate EST timestamp
-    est = pytz.timezone('America/New_York')
-    timestamp = datetime.now(est).strftime("%Y%m%d_%H%M%S_EST")
-    
+def save_results(method_name: str, metrics_str: str, results_df: pd.DataFrame, run_dir: str):
+    """Saves metrics and patient-level predictions to the specific run folder."""
     # Save Metrics
-    metrics_path = f"results/{method_name}_metrics_{timestamp}.txt"
+    metrics_path = os.path.join(run_dir, f"{method_name}_metrics.txt")
     with open(metrics_path, "w") as f:
         f.write(metrics_str)
     
     # Save Predictions
-    preds_path = f"results/{method_name}_predictions_{timestamp}.csv"
+    preds_path = os.path.join(run_dir, f"{method_name}_predictions.csv")
     results_df.to_csv(preds_path, index=False)
     
     print(f"\n[+] Results saved successfully to:\n   - {metrics_path}\n   - {preds_path}")
 
-def run_logistic_regression(X, y, patients_info, feature_names, cv_folds: int = 5, random_state: int = 42):
+def run_logistic_regression(X, y, patients_info, feature_names, run_dir: str, cv_folds: int = 5, random_state: int = 42):
     print("\n" + "="*40)
     print(f"Executing LOGISTIC REGRESSION ({cv_folds}-Fold CV)")
     print("="*40)
@@ -161,10 +155,10 @@ def run_logistic_regression(X, y, patients_info, feature_names, cv_folds: int = 
     test_results['log_reg_pred'] = y_pred
     test_results['log_reg_prob'] = y_proba
 
-    save_results("log_reg", metrics_block, test_results)
+    save_results("log_reg", metrics_block, test_results, run_dir)
     return test_results
 
-def run_xgboost(X, y, patients_info, cv_folds: int = 5, random_state: int = 42):
+def run_xgboost(X, y, patients_info, run_dir: str, cv_folds: int = 5, random_state: int = 42):
     print("\n" + "="*40)
     print(f"Executing XGBOOST ({cv_folds}-Fold CV)")
     print("="*40)
@@ -205,7 +199,7 @@ def run_xgboost(X, y, patients_info, cv_folds: int = 5, random_state: int = 42):
     test_results['xgb_pred'] = y_pred_xgb
     test_results['xgb_prob'] = y_proba_xgb
 
-    save_results("xgboost", metrics_block, test_results)
+    save_results("xgboost", metrics_block, test_results, run_dir)
     return test_results
 
 def main():
@@ -241,12 +235,19 @@ def main():
         target_col=args.target_col
     )
 
+    # Prepare Run Directory
+    est = pytz.timezone('America/New_York')
+    timestamp = datetime.now(est).strftime("%Y%m%d_%H%M%S_EST")
+    run_dir = f"results/run_{timestamp}"
+    os.makedirs(run_dir, exist_ok=True)
+    print(f"\n[+] Created run directory for output: {run_dir}")
+
     # 3. Model Execution
     if "log_reg" in args.methods:
-        run_logistic_regression(X, y, patients_info, feature_names, cv_folds=args.cv_folds, random_state=args.random_state)
+        run_logistic_regression(X, y, patients_info, feature_names, run_dir, cv_folds=args.cv_folds, random_state=args.random_state)
 
     if "xgboost" in args.methods:
-        run_xgboost(X, y, patients_info, cv_folds=args.cv_folds, random_state=args.random_state)
+        run_xgboost(X, y, patients_info, run_dir, cv_folds=args.cv_folds, random_state=args.random_state)
 
 if __name__ == "__main__":
     main()
