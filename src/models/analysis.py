@@ -10,6 +10,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
+from sklearn.gaussian_process import GaussianProcessClassifier
 from sklearn.metrics import (
     roc_auc_score,
     classification_report,
@@ -241,8 +242,8 @@ def run_svm(X_train, X_test, y_train, y_test, info_test, run_dir: str, cv_folds:
         ('model', SVC(probability=True, class_weight="balanced", random_state=random_state))
     ])
 
-    print(f"Evaluating {cv_folds}-Fold internally on Train array...")
-    cv_y_proba = cross_val_predict(pipeline, X_train, y_train, cv=cv, method="predict_proba")[:, 1]
+    print(f"Evaluating {cv_folds}-Fold internally on Train array (threaded)...")
+    cv_y_proba = cross_val_predict(pipeline, X_train, y_train, cv=cv, method="predict_proba", n_jobs=-1)[:, 1]
     cv_roc = roc_auc_score(y_train, cv_y_proba)
 
     pipeline.fit(X_train, y_train)
@@ -274,11 +275,56 @@ def run_svm(X_train, X_test, y_train, y_test, info_test, run_dir: str, cv_folds:
     save_results("svm", metrics_block, test_results, run_dir)
     return test_results
 
+def run_gaussian_process(X_train, X_test, y_train, y_test, info_test, run_dir: str, cv_folds: int = 5, random_state: int = 42):
+    print("\n" + "="*40)
+    print(f"Executing GAUSSIAN PROCESS")
+    print("="*40)
+
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
+    
+    pipeline = Pipeline([
+        ('scaler', StandardScaler()),
+        ('model', GaussianProcessClassifier(random_state=random_state, n_jobs=-1))
+    ])
+
+    print(f"Evaluating {cv_folds}-Fold internally on Train array (threaded)...")
+    cv_y_proba = cross_val_predict(pipeline, X_train, y_train, cv=cv, method="predict_proba", n_jobs=-1)[:, 1]
+    cv_roc = roc_auc_score(y_train, cv_y_proba)
+
+    pipeline.fit(X_train, y_train)
+
+    print("Evaluating finalized model on locked Test Set...")
+    y_pred_gp = pipeline.predict(X_test)
+    y_proba_gp = pipeline.predict_proba(X_test)[:, 1]
+
+    roc_val = roc_auc_score(y_test, y_proba_gp)
+    cr_val = classification_report(y_test, y_pred_gp)
+    cm_val = confusion_matrix(y_test, y_pred_gp)
+
+    metrics_block = (
+        f"[TRAINING STABILITY]\n"
+        f"Cross-Validated ROC-AUC on Train Split: {cv_roc:.4f}\n\n"
+        f"{'-'*40}\n"
+        f"[FINAL TEST SET HOLDOUT]\n"
+        f"Test ROC-AUC: {roc_val:.4f}\n\n"
+        f"Classification Report:\n{cr_val}\n\n"
+        f"Confusion Matrix:\n{cm_val}\n"
+    )
+    print(metrics_block)
+
+    test_results = info_test.copy()
+    test_results['true_label'] = y_test
+    test_results['gp_pred'] = y_pred_gp
+    test_results['gp_prob'] = y_proba_gp
+
+    save_results("gp", metrics_block, test_results, run_dir)
+    return test_results
+
 def main():
     parser = argparse.ArgumentParser(description="Run Cohort Analysis Pipeline")
     parser.add_argument("--data", type=str, required=True, help="Path to the unified cohort CSV")
     parser.add_argument("--target_col", type=str, default="recurrent_uti_90d_flag", help="Outcome column to predict")
-    parser.add_argument("--methods", nargs="+", choices=["log_reg", "xgboost", "svm"], required=True, help="Methods to run")
+    parser.add_argument("--methods", nargs="+", choices=["log_reg", "xgboost", "svm", "gp"], required=True, help="Methods to run")
     parser.add_argument("--random_state", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--cv_folds", type=int, default=5, help="Number of folds for Cross Validation (default: 5)")
 
@@ -288,7 +334,11 @@ def main():
         "person_id",
         "index_uti_date",
         "first_recurrent_uti_date",
-        "first_abx_0_10d_date"
+        "first_abx_0_10d_date",
+        "first_repeat_abx_date",
+        "first_er_date",
+        "last_uti_date_1yr",
+        "last_abx_date_1yr"
     ]
 
     # 1. Load Data
@@ -324,6 +374,9 @@ def main():
 
     if "svm" in args.methods:
         run_svm(X_train, X_test, y_train, y_test, info_test, run_dir, cv_folds=args.cv_folds, random_state=args.random_state)
+        
+    if "gp" in args.methods:
+        run_gaussian_process(X_train, X_test, y_train, y_test, info_test, run_dir, cv_folds=args.cv_folds, random_state=args.random_state)
 
 if __name__ == "__main__":
     main()

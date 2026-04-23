@@ -158,7 +158,16 @@ def plot_feature_importances(data_path, out_dir):
     print("Re-fitting models globally for deterministic Feature Importances...")
     
     # Hook into analysis module loader
-    drop_cols = ["person_id", "index_uti_date", "first_recurrent_uti_date", "first_abx_0_10d_date"]
+    drop_cols = [
+        "person_id",
+        "index_uti_date",
+        "first_recurrent_uti_date",
+        "first_abx_0_10d_date",
+        "first_repeat_abx_date",
+        "first_er_date",
+        "last_uti_date_1yr",
+        "last_abx_date_1yr"
+    ]
     target_col = "recurrent_uti_90d_flag"
     
     # Route STDOUT dynamically to prevent script spam
