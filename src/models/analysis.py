@@ -5,7 +5,7 @@ import numpy as np
 from datetime import datetime
 import pytz
 
-from sklearn.model_selection import StratifiedKFold, cross_val_predict
+from sklearn.model_selection import StratifiedKFold, cross_val_predict, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
@@ -65,10 +65,10 @@ class CohortDataLoader:
 
         return self.patients_info, self.predictors, self.targets
 
-def preprocess_data(patients_info: pd.DataFrame, predictors: pd.DataFrame, targets: pd.DataFrame, target_col: str):
+def preprocess_data(patients_info: pd.DataFrame, predictors: pd.DataFrame, targets: pd.DataFrame, target_col: str, random_state: int = 42):
     """
     Combines predictors and targets, imputes missing values.
-    Returns un-scaled features to allow K-Fold cross validation to scale safely inside folds.
+    Returns explicit 80/20 train/test subdivisions safely.
     """
     print("\n--- Preprocessing Data ---")
     
@@ -93,8 +93,16 @@ def preprocess_data(patients_info: pd.DataFrame, predictors: pd.DataFrame, targe
     print(f"Features shape after dummy-encoding: {X.shape}")
     print(f"Target distribution for '{target_col}':")
     print(y.value_counts(normalize=True))
+    
+    # Execute explicit holdout slice
+    X_train, X_test, y_train, y_test, info_train, info_test = train_test_split(
+        X, y, patients_info, test_size=0.2, stratify=y, random_state=random_state
+    )
 
-    return X, y, X.columns
+    print(f"\n[+] Explicit Training Cohort generated: {X_train.shape[0]} patients")
+    print(f"[+] Explicit Testing Holdout generated: {X_test.shape[0]} patients")
+
+    return X_train, X_test, y_train, y_test, info_train, info_test, X.columns
 
 def save_results(method_name: str, metrics_str: str, results_df: pd.DataFrame, run_dir: str):
     """Saves metrics and patient-level predictions to the specific run folder."""
@@ -103,15 +111,15 @@ def save_results(method_name: str, metrics_str: str, results_df: pd.DataFrame, r
     with open(metrics_path, "w") as f:
         f.write(metrics_str)
     
-    # Save Predictions
+    # Save Predictions strictly
     preds_path = os.path.join(run_dir, f"{method_name}_predictions.csv")
     results_df.to_csv(preds_path, index=False)
     
     print(f"\n[+] Results saved successfully to:\n   - {metrics_path}\n   - {preds_path}")
 
-def run_logistic_regression(X, y, patients_info, feature_names, run_dir: str, cv_folds: int = 5, random_state: int = 42):
+def run_logistic_regression(X_train, X_test, y_train, y_test, info_test, feature_names, run_dir: str, cv_folds: int = 5, random_state: int = 42):
     print("\n" + "="*40)
-    print(f"Executing LOGISTIC REGRESSION ({cv_folds}-Fold CV)")
+    print(f"Executing LOGISTIC REGRESSION")
     print("="*40)
     
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
@@ -121,17 +129,23 @@ def run_logistic_regression(X, y, patients_info, feature_names, run_dir: str, cv
         ('model', LogisticRegression(max_iter=1000, class_weight="balanced", random_state=random_state))
     ])
 
-    print(f"Running cross validation...")
-    y_pred = cross_val_predict(pipeline, X, y, cv=cv, method="predict")
-    y_proba = cross_val_predict(pipeline, X, y, cv=cv, method="predict_proba")[:, 1]
+    print(f"Evaluating {cv_folds}-Fold internally on Train array...")
+    cv_y_proba = cross_val_predict(pipeline, X_train, y_train, cv=cv, method="predict_proba")[:, 1]
+    cv_roc = roc_auc_score(y_train, cv_y_proba)
+
+    # 2. Fit to global train slice
+    pipeline.fit(X_train, y_train)
+    
+    # 3. Final Test Prediction
+    print("Evaluating finalized model on locked Test Set...")
+    y_pred = pipeline.predict(X_test)
+    y_proba = pipeline.predict_proba(X_test)[:, 1]
 
     # Generate Metrics
-    roc_val = roc_auc_score(y, y_proba)
-    cr_val = classification_report(y, y_pred)
-    cm_val = confusion_matrix(y, y_pred)
+    roc_val = roc_auc_score(y_test, y_proba)
+    cr_val = classification_report(y_test, y_pred)
+    cm_val = confusion_matrix(y_test, y_pred)
     
-    # Fit globally once just to gracefully extract final feature coefficients
-    pipeline.fit(X, y)
     model = pipeline.named_steps['model']
     coefficients = pd.DataFrame({
         "feature": feature_names,
@@ -141,32 +155,34 @@ def run_logistic_regression(X, y, patients_info, feature_names, run_dir: str, cv
     coefficients = coefficients.sort_values(by="abs_coef", ascending=False)
     top_10 = coefficients.head(10).to_string()
 
-    # Compile the printed output block
     metrics_block = (
-        f"Cross-Validated ROC-AUC: {roc_val}\n\n"
+        f"[TRAINING STABILITY]\n"
+        f"Cross-Validated ROC-AUC on Train Split: {cv_roc:.4f}\n\n"
+        f"{'-'*40}\n"
+        f"[FINAL TEST SET HOLDOUT]\n"
+        f"Test ROC-AUC: {roc_val:.4f}\n\n"
         f"Classification Report:\n{cr_val}\n\n"
         f"Confusion Matrix:\n{cm_val}\n\n"
-        f"Top 10 Feature Coefficients (Global Fit):\n{top_10}\n"
+        f"Top 10 Feature Coefficients:\n{top_10}\n"
     )
     print(metrics_block)
 
-    # Append tracking columns
-    test_results = patients_info.copy()
-    test_results['true_label'] = y
+    # Target explicitly info_test
+    test_results = info_test.copy()
+    test_results['true_label'] = y_test
     test_results['log_reg_pred'] = y_pred
     test_results['log_reg_prob'] = y_proba
 
     save_results("log_reg", metrics_block, test_results, run_dir)
     return test_results
 
-def run_xgboost(X, y, patients_info, run_dir: str, cv_folds: int = 5, random_state: int = 42):
+def run_xgboost(X_train, X_test, y_train, y_test, info_test, run_dir: str, cv_folds: int = 5, random_state: int = 42):
     print("\n" + "="*40)
-    print(f"Executing XGBOOST ({cv_folds}-Fold CV)")
+    print(f"Executing XGBOOST")
     print("="*40)
 
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
     
-    # XGBoost does not strictly need scaling, but the pipeline maintains analytical uniformity
     pipeline = Pipeline([
         ('scaler', StandardScaler()),
         ('model', xgb.XGBClassifier(
@@ -180,32 +196,42 @@ def run_xgboost(X, y, patients_info, run_dir: str, cv_folds: int = 5, random_sta
         ))
     ])
 
-    print(f"Running cross validation...")
-    y_pred_xgb = cross_val_predict(pipeline, X, y, cv=cv, method="predict")
-    y_proba_xgb = cross_val_predict(pipeline, X, y, cv=cv, method="predict_proba")[:, 1]
+    print(f"Evaluating {cv_folds}-Fold internally on Train array...")
+    cv_y_proba = cross_val_predict(pipeline, X_train, y_train, cv=cv, method="predict_proba")[:, 1]
+    cv_roc = roc_auc_score(y_train, cv_y_proba)
 
-    roc_val = roc_auc_score(y, y_proba_xgb)
-    cr_val = classification_report(y, y_pred_xgb)
-    cm_val = confusion_matrix(y, y_pred_xgb)
+    pipeline.fit(X_train, y_train)
+    
+    print("Evaluating finalized model on locked Test Set...")
+    y_pred_xgb = pipeline.predict(X_test)
+    y_proba_xgb = pipeline.predict_proba(X_test)[:, 1]
+
+    roc_val = roc_auc_score(y_test, y_proba_xgb)
+    cr_val = classification_report(y_test, y_pred_xgb)
+    cm_val = confusion_matrix(y_test, y_pred_xgb)
 
     metrics_block = (
-        f"Cross-Validated ROC-AUC: {roc_val}\n\n"
+        f"[TRAINING STABILITY]\n"
+        f"Cross-Validated ROC-AUC on Train Split: {cv_roc:.4f}\n\n"
+        f"{'-'*40}\n"
+        f"[FINAL TEST SET HOLDOUT]\n"
+        f"Test ROC-AUC: {roc_val:.4f}\n\n"
         f"Classification Report:\n{cr_val}\n\n"
         f"Confusion Matrix:\n{cm_val}\n"
     )
     print(metrics_block)
 
-    test_results = patients_info.copy()
-    test_results['true_label'] = y
+    test_results = info_test.copy()
+    test_results['true_label'] = y_test
     test_results['xgb_pred'] = y_pred_xgb
     test_results['xgb_prob'] = y_proba_xgb
 
     save_results("xgboost", metrics_block, test_results, run_dir)
     return test_results
 
-def run_svm(X, y, patients_info, run_dir: str, cv_folds: int = 5, random_state: int = 42):
+def run_svm(X_train, X_test, y_train, y_test, info_test, run_dir: str, cv_folds: int = 5, random_state: int = 42):
     print("\n" + "="*40)
-    print(f"Executing SVM ({cv_folds}-Fold CV)")
+    print(f"Executing SVM")
     print("="*40)
 
     cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=random_state)
@@ -215,23 +241,33 @@ def run_svm(X, y, patients_info, run_dir: str, cv_folds: int = 5, random_state: 
         ('model', SVC(probability=True, class_weight="balanced", random_state=random_state))
     ])
 
-    print(f"Running cross validation...")
-    y_pred_svm = cross_val_predict(pipeline, X, y, cv=cv, method="predict")
-    y_proba_svm = cross_val_predict(pipeline, X, y, cv=cv, method="predict_proba")[:, 1]
+    print(f"Evaluating {cv_folds}-Fold internally on Train array...")
+    cv_y_proba = cross_val_predict(pipeline, X_train, y_train, cv=cv, method="predict_proba")[:, 1]
+    cv_roc = roc_auc_score(y_train, cv_y_proba)
 
-    roc_val = roc_auc_score(y, y_proba_svm)
-    cr_val = classification_report(y, y_pred_svm)
-    cm_val = confusion_matrix(y, y_pred_svm)
+    pipeline.fit(X_train, y_train)
+
+    print("Evaluating finalized model on locked Test Set...")
+    y_pred_svm = pipeline.predict(X_test)
+    y_proba_svm = pipeline.predict_proba(X_test)[:, 1]
+
+    roc_val = roc_auc_score(y_test, y_proba_svm)
+    cr_val = classification_report(y_test, y_pred_svm)
+    cm_val = confusion_matrix(y_test, y_pred_svm)
 
     metrics_block = (
-        f"Cross-Validated ROC-AUC: {roc_val}\n\n"
+        f"[TRAINING STABILITY]\n"
+        f"Cross-Validated ROC-AUC on Train Split: {cv_roc:.4f}\n\n"
+        f"{'-'*40}\n"
+        f"[FINAL TEST SET HOLDOUT]\n"
+        f"Test ROC-AUC: {roc_val:.4f}\n\n"
         f"Classification Report:\n{cr_val}\n\n"
         f"Confusion Matrix:\n{cm_val}\n"
     )
     print(metrics_block)
 
-    test_results = patients_info.copy()
-    test_results['true_label'] = y
+    test_results = info_test.copy()
+    test_results['true_label'] = y_test
     test_results['svm_pred'] = y_pred_svm
     test_results['svm_prob'] = y_proba_svm
 
@@ -263,12 +299,13 @@ def main():
     )
     patients_info, predictors, targets = loader.load_data()
 
-    # 2. Preprocess Data (No scaling/splitting here, delayed for CV pipeline)
-    X, y, feature_names = preprocess_data(
+    # 2. Preprocess Data 
+    X_train, X_test, y_train, y_test, info_train, info_test, feature_names = preprocess_data(
         patients_info=patients_info,
         predictors=predictors, 
         targets=targets, 
-        target_col=args.target_col
+        target_col=args.target_col,
+        random_state=args.random_state
     )
 
     # Prepare Run Directory
@@ -280,13 +317,13 @@ def main():
 
     # 3. Model Execution
     if "log_reg" in args.methods:
-        run_logistic_regression(X, y, patients_info, feature_names, run_dir, cv_folds=args.cv_folds, random_state=args.random_state)
+        run_logistic_regression(X_train, X_test, y_train, y_test, info_test, feature_names, run_dir, cv_folds=args.cv_folds, random_state=args.random_state)
 
     if "xgboost" in args.methods:
-        run_xgboost(X, y, patients_info, run_dir, cv_folds=args.cv_folds, random_state=args.random_state)
+        run_xgboost(X_train, X_test, y_train, y_test, info_test, run_dir, cv_folds=args.cv_folds, random_state=args.random_state)
 
     if "svm" in args.methods:
-        run_svm(X, y, patients_info, run_dir, cv_folds=args.cv_folds, random_state=args.random_state)
+        run_svm(X_train, X_test, y_train, y_test, info_test, run_dir, cv_folds=args.cv_folds, random_state=args.random_state)
 
 if __name__ == "__main__":
     main()

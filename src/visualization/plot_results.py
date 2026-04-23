@@ -168,7 +168,11 @@ def plot_feature_importances(data_path, out_dir):
     
     loader = CohortDataLoader(data_path=data_path, target_col=target_col, drop_cols=drop_cols)
     patients_info, predictors, targets = loader.load_data()
-    X, y, feature_names = preprocess_data(patients_info, predictors, targets, target_col)
+    X_train, X_test, y_train, y_test, info_train, info_test, feature_names = preprocess_data(patients_info, predictors, targets, target_col)
+    
+    # We fit purely on the Training slice to get accurate representation of what the model learned!
+    X = X_train
+    y = y_train
     
     # Restore stdout
     sys.stdout = old_stdout
