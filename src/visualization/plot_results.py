@@ -257,3 +257,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+    '''
+    Example usage:
+
+    python src/visualization/plot_results.py \
+        --run_dir "results/run_20260423_140319_EST" \
+        --data "src/features/uti_cohort_everything.csv"
+    '''

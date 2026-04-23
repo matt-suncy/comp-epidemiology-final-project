@@ -10,6 +10,6 @@ cd "$(git rev-parse --show-toplevel)"
 python3 src/models/analysis.py \
 --data src/features/uti_cohort_everything.csv \
 --target_col recurrent_uti_90d_flag \
---methods log_reg xgboost \
+--methods log_reg xgboost svm \
 --random_state 42 \
 --cv_folds 5
