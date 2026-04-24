@@ -7,3 +7,9 @@ __pycache__/
 *.csv
 *.tsv
 *.txt
+
+# Cache
+.DS_Store
+.env
+.venv
+.vscode
