@@ -66,36 +66,99 @@ class CohortDataLoader:
 
         return self.patients_info, self.predictors, self.targets
 
-def preprocess_data(patients_info: pd.DataFrame, predictors: pd.DataFrame, targets: pd.DataFrame, target_col: str, random_state: int = 42):
-    """
-    Combines predictors and targets, imputes missing values.
-    Returns explicit 80/20 train/test subdivisions safely.
-    """
+def preprocess_data(
+    patients_info: pd.DataFrame,
+    predictors: pd.DataFrame,
+    targets: pd.DataFrame,
+    target_col: str,
+    random_state: int = 42
+):
     print("\n--- Preprocessing Data ---")
-    
+
     if target_col not in targets.columns:
         raise ValueError(f"Target column '{target_col}' not found in target dataframe.")
 
     y = targets[target_col]
     X = predictors.copy()
 
-    # Fill missing values
+    # Missingness indicators BEFORE imputation
+    timing_indicator_map = {
+        "days_since_last_uti": "no_prior_uti_timing_flag",
+        "days_since_last_abx": "no_prior_abx_timing_flag",
+        "days_to_repeat_abx": "no_repeat_abx_flag",
+        "days_to_er_visit": "no_er_followup_flag",
+    }
+    for src_col, indicator_col in timing_indicator_map.items():
+        if src_col in X.columns:
+            X[indicator_col] = X[src_col].isna().astype(int)
+
+    # Timing features: missing means no prior/no event
+    for col in [
+        "days_since_last_uti",
+        "days_since_last_abx",
+        "days_to_repeat_abx",
+        "days_to_er_visit",
+    ]:
+        if col in X.columns:
+            X[col] = X[col].fillna(999)
+
+    # Count-like features
+    for col in [
+        "num_distinct_abx_0_10d",
+        "prior_uti_count_1yr",
+        "prior_abx_exposure_count_1yr",
+        "prior_distinct_abx_count_1yr",
+        "total_visits_1yr",
+        "outpatient_visits_1yr",
+        "er_visits_1yr",
+        "inpatient_visits_1yr",
+        "ckd_1yr_count",
+        "htn_1yr_count",
+        "kidney_failure_1yr_count",
+        "diabetes_1yr_count",
+        "comorbidity_count_ever",
+    ]:
+        if col in X.columns:
+            X[col] = X[col].fillna(0)
+
+    # Binary flags
+    for col in [
+        "age_65_plus_flag",
+        "age_80_plus_flag",
+        "any_abx_0_10d_flag",
+        "abx_switch_0_10d_flag",
+        "repeat_abx_11_30d_flag",
+        "er_30d_flag",
+        "prior_uti_any_1yr_flag",
+        "recurrent_history_1yr_flag",
+        "prior_abx_any_1yr_flag",
+        "ckd_ever_flag",
+        "ckd_1yr_flag",
+        "htn_ever_flag",
+        "htn_1yr_flag",
+        "kidney_failure_ever_flag",
+        "kidney_failure_1yr_flag",
+        "diabetes_ever_flag",
+        "diabetes_1yr_flag",
+    ]:
+        if col in X.columns:
+            X[col] = X[col].fillna(0)
+
+    # Final fallback
     X = X.fillna(0)
 
-    # Automatically dummy-encode any remaining object/string columns
-    object_cols = X.select_dtypes(include=['object', 'string']).columns.tolist()
+    # Encode categoricals
+    object_cols = X.select_dtypes(include=["object", "string"]).columns.tolist()
     if object_cols:
         X = pd.get_dummies(X, columns=object_cols, drop_first=True)
 
-    # Convert categoricals if present (gender_concept_id is natively int, so it needs explicit handling)
     if "gender_concept_id" in X.columns:
         X = pd.get_dummies(X, columns=["gender_concept_id"], drop_first=True)
 
     print(f"Features shape after dummy-encoding: {X.shape}")
     print(f"Target distribution for '{target_col}':")
     print(y.value_counts(normalize=True))
-    
-    # Execute explicit holdout slice
+
     X_train, X_test, y_train, y_test, info_train, info_test = train_test_split(
         X, y, patients_info, test_size=0.2, stratify=y, random_state=random_state
     )
@@ -331,15 +394,35 @@ def main():
     args = parser.parse_args()
 
     drop_cols = [
-        "person_id",
-        "index_uti_date",
-        "first_recurrent_uti_date",
-        "first_abx_0_10d_date",
-        "first_repeat_abx_date",
-        "first_er_date",
-        "last_uti_date_1yr",
-        "last_abx_date_1yr"
-    ]
+    # identifiers / leakage
+    "person_id",
+    "index_uti_date",
+    "first_recurrent_uti_date",
+    "first_abx_0_10d_date",
+    "first_abx_0_10d_concept_id",
+
+    # utilization redundancy
+    "outpatient_visits_1yr",
+    "inpatient_visits_1yr",
+
+    # antibiotic redundancy
+    "prior_abx_exposure_count_1yr",
+
+    # UTI redundancy
+    "prior_uti_any_1yr_flag",
+
+    # comorbidity counts
+    "ckd_1yr_count",
+    "htn_1yr_count",
+    "kidney_failure_1yr_count",
+    "diabetes_1yr_count",
+
+    # others to remove
+    "ckd_1yr_flag",
+    "htn_1yr_flag",
+    "kidney_failure_1yr_flag",
+    "diabetes_1yr_flag",
+]
 
     # 1. Load Data
     loader = CohortDataLoader(
