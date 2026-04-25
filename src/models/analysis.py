@@ -422,7 +422,7 @@ def main():
     "htn_1yr_flag",
     "kidney_failure_1yr_flag",
     "diabetes_1yr_flag",
-]
+    ]
 
     # 1. Load Data
     loader = CohortDataLoader(
