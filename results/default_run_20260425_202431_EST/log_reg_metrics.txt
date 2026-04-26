@@ -1,0 +1,34 @@
+[TRAINING STABILITY]
+Cross-Validated ROC-AUC on Train Split: 0.6125
+
+----------------------------------------
+[FINAL TEST SET HOLDOUT]
+Test ROC-AUC: 0.6409
+
+Classification Report:
+              precision    recall  f1-score   support
+
+           0       0.86      0.56      0.68       287
+           1       0.27      0.65      0.38        71
+
+    accuracy                           0.58       358
+   macro avg       0.57      0.60      0.53       358
+weighted avg       0.75      0.58      0.62       358
+
+
+Confusion Matrix:
+[[160 127]
+ [ 25  46]]
+
+Top 10 Feature Coefficients:
+                         feature  coefficient  abs_coef
+11            diabetes_ever_flag     0.267606  0.267606
+4               total_visits_1yr     0.229026  0.229026
+7   prior_distinct_abx_count_1yr     0.168887  0.168887
+0                   age_at_index     0.101937  0.101937
+1         num_distinct_abx_0_10d    -0.078964  0.078964
+9                  htn_ever_flag     0.052140  0.052140
+8                  ckd_ever_flag     0.045465  0.045465
+2         repeat_abx_11_30d_flag    -0.025683  0.025683
+6            prior_uti_count_1yr     0.014607  0.014607
+12        gender_concept_id_8532     0.003689  0.003689

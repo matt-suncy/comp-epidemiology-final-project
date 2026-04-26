@@ -4,9 +4,9 @@
 __pycache__/
 
 # Raw data
-*.csv
-*.tsv
-*.txt
+# *.csv
+# *.tsv
+# *.txt
 
 # Cache
 .DS_Store

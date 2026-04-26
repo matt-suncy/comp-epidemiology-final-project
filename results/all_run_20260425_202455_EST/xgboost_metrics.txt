@@ -1,0 +1,21 @@
+[TRAINING STABILITY]
+Cross-Validated ROC-AUC on Train Split: 0.6186
+
+----------------------------------------
+[FINAL TEST SET HOLDOUT]
+Test ROC-AUC: 0.6201
+
+Classification Report:
+              precision    recall  f1-score   support
+
+           0       0.85      1.00      0.92      8342
+           1       0.22      0.00      0.01      1480
+
+    accuracy                           0.85      9822
+   macro avg       0.54      0.50      0.46      9822
+weighted avg       0.75      0.85      0.78      9822
+
+
+Confusion Matrix:
+[[8328   14]
+ [1476    4]]
